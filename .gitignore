@@ -1,0 +1,7 @@
+/dist/
+/ratelimiter
+/ratelimiter.exe
+coverage.out
+.idea/
+.vscode/
+.DS_Store
