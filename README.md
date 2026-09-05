@@ -8,9 +8,10 @@
 A small Go HTTP service that rate-limits requests per client with a **token bucket**.
 It exists to demonstrate two GitHub Actions workflows on a real, tested Go project:
 
-- **CI** — every push to `main` is built and tested.
+- **CI** — every push to `main` is built, tested, and packaged into a Docker image that is smoke-tested.
 - **CD** — publishing a GitHub Release lints, tests, cross-compiles the binary for five OS/architecture
-  targets, and attaches the binaries plus a checksum file to that release.
+  targets, attaches the binaries plus a checksum file to that release, and pushes a multi-arch Docker
+  image to GitHub Container Registry.
 
 The project has no third-party dependencies and was written test-first.
 
@@ -28,7 +29,7 @@ The server exposes a single endpoint, `GET /`. Each client (keyed by IP address)
 
 ```
 $ ./ratelimiter -addr :8080 -capacity 5 -refill 1s
-time=... level=INFO msg=listening address=:8080 capacity=5 refill_every=1s version=v1.0.0
+time=... level=INFO msg=listening address=:8080 capacity=5 refill_every=1s version=v1.1.0
 
 $ for i in 1 2 3 4 5 6; do curl -s -o /dev/null -w '%{http_code}\n' localhost:8080/; done
 200
@@ -54,6 +55,18 @@ X-Content-Type-Options: nosniff
 
 The server shuts down gracefully on `SIGINT`/`SIGTERM`.
 
+### Running it from Docker
+
+```sh
+docker run --rm -p 8080:8080 ghcr.io/rr-saberov/ratelimiter:latest
+docker run --rm -p 8080:8080 ghcr.io/rr-saberov/ratelimiter:1.1.0 -capacity 20 -refill 250ms
+```
+
+Images are published for `linux/amd64` and `linux/arm64`, tagged with the full version (`1.1.0`),
+the minor version (`1.1`), and `latest`. The `Dockerfile` is a two-stage build: the Go toolchain
+compiles a static binary on the build platform (cross-compiling for the target, so no emulation is
+needed), and the runtime stage is `distroless/static` running as a non-root user, about 8 MB in total.
+
 ### Layout
 
 ```
@@ -67,6 +80,7 @@ The server shuts down gracefully on `SIGINT`/`SIGTERM`.
 ├── internal/httpapi/        handler and rate-limiting middleware (429 + Retry-After)
 ├── ratelimit/               token bucket and per-key limiter (importable library)
 ├── .golangci.yml            golangci-lint v2 configuration used by the CD workflow
+├── Dockerfile               multi-stage, multi-arch image (distroless, non-root)
 └── Makefile                 the same commands the workflows run
 ```
 
@@ -86,6 +100,7 @@ make test     # go test -race -count=1 ./...
 make lint     # golangci-lint run  (v2.x; the CD workflow pins v2.13.2)
 make build    # CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=dev" -o ratelimiter ./cmd/ratelimiter
 make run      # build, then start the server with default flags
+make docker   # docker build --build-arg VERSION=dev -t ratelimiter:dev .
 ```
 
 ## Workflows
@@ -93,9 +108,9 @@ make run      # build, then start the server with default flags
 ### Phase 1 — CI (`.github/workflows/ci.yml`)
 
 **Trigger:** every push to `main`. Pull requests targeting `main` and manual runs (`workflow_dispatch`)
-run the same job, so a change is verified before it lands and can be re-run on demand.
+run the same jobs, so a change is verified before it lands and can be re-run on demand.
 
-**Steps** (single job, `ubuntu-latest`):
+**Job `verify`** (`ubuntu-latest`):
 
 1. `actions/checkout` — check out the commit.
 2. `actions/setup-go` — install the Go version declared in `go.mod` (`go-version-file`) and restore the
@@ -103,9 +118,17 @@ run the same job, so a change is verified before it lands and can be re-run on d
 3. `go build ./...` — compile every package.
 4. `go test -race -count=1 ./...` — run all tests with the race detector, without the test cache.
 
+**Job `docker`** (runs after `verify`):
+
+1. `docker/setup-buildx-action` — a BuildKit builder with GitHub Actions cache support.
+2. `docker/build-push-action` — build the image from the `Dockerfile` with `VERSION=<commit sha>`,
+   load it into the local daemon, and keep layers in the Actions cache (`type=gha`). Nothing is pushed.
+3. Smoke test — run the container with `-version` and assert it prints the commit SHA, which proves the
+   image starts, the entrypoint works as the non-root user, and the build argument reached the binary.
+
 **Details worth noting:**
 
-- `permissions: contents: read` — the job gets a read-only token; CI never needs more.
+- `permissions: contents: read` — the workflow gets a read-only token; CI never needs more.
 - `concurrency` — superseded runs of the same pull request are cancelled; runs on `main` are never
   cancelled so every commit on `main` keeps its own result.
 - `timeout-minutes: 10` — a hung job cannot burn runner minutes.
@@ -124,6 +147,7 @@ flowchart LR
     V --> B3[build darwin/amd64]
     V --> B4[build darwin/arm64]
     V --> B5[build windows/amd64]
+    V --> D[docker<br/>multi-arch image to GHCR]
     B1 & B2 & B3 & B4 & B5 --> P[publish<br/>checksums + upload to release]
 ```
 
@@ -131,21 +155,26 @@ flowchart LR
 
 1. **verify** — `actions/checkout`, `actions/setup-go`, then `golangci/golangci-lint-action` runs
    golangci-lint v2.13.2 with the repository's `.golangci.yml`, and `go test -race -count=1 ./...`
-   runs the test suite. A release with lint errors or failing tests never gets binaries.
+   runs the test suite. A release with lint errors or failing tests never gets binaries or an image.
 2. **build** — a matrix job, one runner per target (`linux/amd64`, `linux/arm64`, `darwin/amd64`,
    `darwin/arm64`, `windows/amd64`). Each runs `go build` with `CGO_ENABLED=0` (static binaries),
    `-trimpath -ldflags "-s -w"` (reproducible and small) and `-X main.version=<tag>` so
    `ratelimiter -version` prints the release tag. Binaries are named
    `ratelimiter_<tag>_<os>_<arch>` (`.exe` on Windows) and handed to the next job with
    `actions/upload-artifact`.
-3. **publish** — the only job with `contents: write`. It collects the five binaries with
+3. **docker** — runs in parallel with the matrix. `docker/login-action` authenticates to `ghcr.io`
+   with the workflow's own `GITHUB_TOKEN`, `docker/metadata-action` derives the image tags from the
+   release tag (`1.1.0`, `1.1`, `latest`) plus OCI labels, and `docker/build-push-action` builds
+   `linux/amd64` and `linux/arm64` in one manifest list and pushes it. This is the only job with
+   `packages: write`.
+4. **publish** — the only job with `contents: write`. It collects the five binaries with
    `actions/download-artifact`, writes `ratelimiter_<tag>_checksums.txt` (SHA-256), and
    `softprops/action-gh-release` attaches all six files to the release that triggered the run
    (`fail_on_unmatched_files` guards against an empty upload). The job summary lists the assets.
 
-The workflow-level token is read-only; only the publish job is elevated. Every job has a
-10-minute timeout, and the release tag is passed to shell steps through an environment variable
-rather than interpolated into the script.
+The workflow-level token is read-only; each job is elevated only for what it does. Every job has a
+timeout, and the release tag is passed to shell steps through an environment variable rather than
+interpolated into the script.
 
 The workflow attaches assets to an already published release, which requires the repository's
 "immutable releases" setting to stay off (the GitHub default). With immutability on, assets would have to be
@@ -154,11 +183,12 @@ attached to a draft release and the draft published afterwards.
 **Cutting a release:**
 
 ```sh
-gh release create v1.0.0 --generate-notes      # or use the "Draft a new release" button on GitHub
+gh release create v1.1.0 --generate-notes      # or use the "Draft a new release" button on GitHub
 gh run watch                                   # optional: follow the CD run
-gh release download v1.0.0 -p 'ratelimiter_v1.0.0_darwin_arm64' -p '*checksums.txt'
-shasum -a 256 --ignore-missing -c ratelimiter_v1.0.0_checksums.txt   # sha256sum on Linux
-chmod +x ratelimiter_v1.0.0_darwin_arm64 && ./ratelimiter_v1.0.0_darwin_arm64 -version
+gh release download v1.1.0 -p 'ratelimiter_v1.1.0_darwin_arm64' -p '*checksums.txt'
+shasum -a 256 --ignore-missing -c ratelimiter_v1.1.0_checksums.txt   # sha256sum on Linux
+chmod +x ratelimiter_v1.1.0_darwin_arm64 && ./ratelimiter_v1.1.0_darwin_arm64 -version
+docker run --rm ghcr.io/rr-saberov/ratelimiter:1.1.0 -version
 ```
 
 ### GitHub Marketplace actions used
@@ -171,6 +201,10 @@ chmod +x ratelimiter_v1.0.0_darwin_arm64 && ./ratelimiter_v1.0.0_darwin_arm64 -v
 | [actions/upload-artifact](https://github.com/marketplace/actions/upload-a-build-artifact) | v7    | CD      | Pass each matrix build's binary to the publish job             |
 | [actions/download-artifact](https://github.com/marketplace/actions/download-a-build-artifact) | v8 | CD      | Collect all binaries into one directory                        |
 | [softprops/action-gh-release](https://github.com/marketplace/actions/gh-release)        | v3      | CD      | Attach binaries and checksums to the GitHub Release            |
+| [docker/setup-buildx-action](https://github.com/marketplace/actions/docker-setup-buildx) | v4     | CI, CD  | BuildKit builder with multi-platform and cache support         |
+| [docker/build-push-action](https://github.com/marketplace/actions/build-and-push-docker-images) | v7 | CI, CD | Build the image (CI) and build + push the multi-arch image (CD) |
+| [docker/login-action](https://github.com/marketplace/actions/docker-login)              | v4      | CD      | Log in to `ghcr.io` with `GITHUB_TOKEN`                        |
+| [docker/metadata-action](https://github.com/marketplace/actions/docker-metadata-action) | v6      | CD      | Derive image tags and OCI labels from the release tag          |
 
 Dependabot (`.github/dependabot.yml`) opens weekly pull requests when any of these actions, or a Go
 module, has a newer version.
