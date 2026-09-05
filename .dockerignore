@@ -8,5 +8,5 @@ ratelimiter.exe
 coverage.out
 *.md
 LICENSE
-Makefile
+Taskfile.yml
 .golangci.yml

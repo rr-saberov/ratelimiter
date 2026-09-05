@@ -81,7 +81,7 @@ needed), and the runtime stage is `distroless/static` running as a non-root user
 ├── ratelimit/               token bucket and per-key limiter (importable library)
 ├── .golangci.yml            golangci-lint v2 configuration used by the CD workflow
 ├── Dockerfile               multi-stage, multi-arch image (distroless, non-root)
-└── Makefile                 the same commands the workflows run
+└── Taskfile.yml             the same commands the workflows run, via Task
 ```
 
 `ratelimit` is the core. `Bucket` is a mutex-guarded token bucket with an injected clock
@@ -95,12 +95,17 @@ shared between instances, and the client key is taken from the TCP peer address 
 
 ### Local development
 
+Commands live in `Taskfile.yml` and run with [Task](https://taskfile.dev) (`brew install go-task`);
+`task --list` shows them all.
+
 ```sh
-make test     # go test -race -count=1 ./...
-make lint     # golangci-lint run  (v2.x; the CD workflow pins v2.13.2)
-make build    # CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=dev" -o ratelimiter ./cmd/ratelimiter
-make run      # build, then start the server with default flags
-make docker   # docker build --build-arg VERSION=dev -t ratelimiter:dev .
+task test                  # go test -race -count=1 ./...
+task lint                  # golangci-lint run  (v2.x; the CD workflow pins v2.13.2)
+task build                 # CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=dev" -o ratelimiter ./cmd/ratelimiter
+task build VERSION=v1.2.3  # same, with that version baked in
+task run                   # build, then start the server with default flags
+task docker                # docker build --build-arg VERSION=dev -t ratelimiter:dev .
+task clean                 # remove the binary, coverage output and dist/
 ```
 
 ## Workflows
