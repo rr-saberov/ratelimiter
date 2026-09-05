@@ -2,127 +2,98 @@ name: CD
 
 on:
   release:
-    types:
-      - published
+    types: [published]
 
 permissions:
   contents: read
 
-env:
-  BINARY_NAME: ratelimiter
-  MAIN_PACKAGE: ./cmd/ratelimiter
-  RELEASE_TAG: ${{ github.event.release.tag_name }}
-
 jobs:
-  verify:
-    name: Lint and test
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
+      - name: Checkout release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
 
       - name: Lint
-        uses: golangci/golangci-lint-action@v9
+        uses: golangci/golangci-lint-action@db9de0fc1a667e1a49d2291a1a042dff081d78f6 # v9
         with:
           version: v2.13.2
 
-      - name: Test
-        run: go test -race -count=1 ./...
-
-  build:
-    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
-    needs: verify
+  test:
+    name: Unit tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    strategy:
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
-          - goos: darwin
-            goarch: amd64
-          - goos: darwin
-            goarch: arm64
-          - goos: windows
-            goarch: amd64
-    env:
-      GOOS: ${{ matrix.goos }}
-      GOARCH: ${{ matrix.goarch }}
-      CGO_ENABLED: "0"
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
+      - name: Checkout release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: go test -race -count=1 -timeout=5m ./...
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
 
       - name: Build binary
-        id: build
-        run: |
-          output="dist/${BINARY_NAME}_${RELEASE_TAG}_${GOOS}_${GOARCH}"
-          if [ "${GOOS}" = "windows" ]; then
-            output="${output}.exe"
-          fi
-          go build -trimpath -ldflags "-s -w -X main.version=${RELEASE_TAG}" -o "${output}" "${MAIN_PACKAGE}"
-          echo "output=${output}" >> "${GITHUB_OUTPUT}"
+        env:
+          CGO_ENABLED: "0"
+        run: go build -o dist/ratelimiter_linux_amd64 ./cmd/ratelimiter
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: ${{ env.BINARY_NAME }}-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: ${{ steps.build.outputs.output }}
+          name: ratelimiter-linux-amd64
+          path: dist/ratelimiter_linux_amd64
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
   publish:
-    name: Attach binaries to release
-    needs: build
+    name: Publish
+    needs: [lint, test, build]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
     steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v8
+      - name: Download build artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          pattern: ${{ env.BINARY_NAME }}-*
+          name: ratelimiter-linux-amd64
           path: dist
-          merge-multiple: true
 
-      - name: Generate checksums
-        working-directory: dist
-        run: |
-          checksums="${BINARY_NAME}_${RELEASE_TAG}_checksums.txt"
-          sha256sum -- * > "${RUNNER_TEMP}/${checksums}"
-          mv "${RUNNER_TEMP}/${checksums}" .
-          cat "${checksums}"
-
-      - name: Upload release assets
-        uses: softprops/action-gh-release@v3
+      - name: Upload binary to release
+        uses: softprops/action-gh-release@5113cdc90fd4d541c801c55356214017bf5ae34b # v3
         with:
-          files: dist/*
+          tag_name: ${{ github.event.release.tag_name }}
+          files: dist/ratelimiter_linux_amd64
           fail_on_unmatched_files: true
-
-      - name: Summarize
-        env:
-          RELEASE_URL: ${{ github.event.release.html_url }}
-        run: |
-          {
-            echo "## Release ${RELEASE_TAG}"
-            echo
-            echo "Assets attached to ${RELEASE_URL}:"
-            echo
-            echo '```'
-            ls -1 dist
-            echo '```'
-          } >> "${GITHUB_STEP_SUMMARY}"

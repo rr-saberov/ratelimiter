@@ -1,0 +1,54 @@
+version: "3"
+
+vars:
+  BINARY_NAME: ratelimiter
+  MAIN_PACKAGE: ./cmd/ratelimiter
+  VERSION: '{{.VERSION | default "dev"}}'
+  LDFLAGS: -s -w -X main.version={{.VERSION}}
+
+tasks:
+  default:
+    desc: List available tasks
+    silent: true
+    cmds:
+      - task --list
+
+  build:
+    desc: Build a static binary with the version baked in (task build VERSION=v1.2.3)
+    env:
+      CGO_ENABLED: "0"
+    cmds:
+      - go build -trimpath -ldflags "{{.LDFLAGS}}" -o {{.BINARY_NAME}} {{.MAIN_PACKAGE}}
+
+  test:
+    desc: Run all tests with the race detector
+    cmds:
+      - go test -race -count=1 -timeout=5m ./...
+
+  coverage:
+    desc: Run tests with race detection and a coverage report
+    cmds:
+      - go test -race -count=1 -timeout=5m -coverprofile=coverage.out ./...
+      - go tool cover -func=coverage.out
+
+  lint:
+    desc: Run golangci-lint
+    cmds:
+      - golangci-lint run
+
+  lint:workflows:
+    desc: Validate GitHub Actions syntax and expressions
+    cmds:
+      - go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+
+  run:
+    desc: Build and start the server with default flags
+    deps: [build]
+    cmds:
+      - ./{{.BINARY_NAME}}
+
+  clean:
+    desc: Remove build outputs
+    cmds:
+      - rm -f {{.BINARY_NAME}} {{.BINARY_NAME}}.exe coverage.out
+      - rm -rf dist
