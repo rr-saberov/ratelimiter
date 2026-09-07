@@ -8,48 +8,118 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: Skip unit tests (manual diagnostic run only)
+        type: boolean
+        default: false
+      skip_lint:
+        description: Skip lint (manual diagnostic run only)
+        type: boolean
+        default: false
+      skip_docker:
+        description: Skip Docker build and smoke test
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # A shared main group can discard pending pushes even with cancellation disabled.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  verify:
-    name: Build and test
+  build:
+    name: Build
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
 
       - name: Build
         run: go build ./...
 
-      - name: Test
-        run: go test -race -count=1 ./...
-
-  docker:
-    name: Docker image
-    needs: verify
+  lint:
+    name: Lint
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.skip_lint }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@db9de0fc1a667e1a49d2291a1a042dff081d78f6 # v9
+        with:
+          version: v2.13.2
+
+      - name: Validate workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+
+  test:
+    name: Unit tests
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.skip_tests }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+
+      - name: Test with race detection and coverage
+        run: go test -race -count=1 -timeout=5m -coverprofile=coverage.out ./...
+
+      - name: Coverage summary
+        run: |
+          go tool cover -func=coverage.out | tee -a "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: coverage
+          path: coverage.out
+          if-no-files-found: error
+          retention-days: 7
+
+  docker:
+    name: Docker image
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.skip_docker }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
 
       - name: Build image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
           load: true
@@ -59,6 +129,46 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Smoke test image
+        run: bash .github/scripts/smoke-docker.sh "ratelimiter:${GITHUB_SHA}" "${GITHUB_SHA}"
+
+  verify:
+    # A diagnostic run must not satisfy the required automatic CI check.
+    name: ${{ github.event_name == 'workflow_dispatch' && 'CI result (manual)' || 'CI result' }}
+    if: ${{ always() }}
+    needs: [build, lint, test, docker]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check required results
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+          LINT_RESULT: ${{ needs.lint.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          DOCKER_RESULT: ${{ needs.docker.result }}
+          SKIP_LINT: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_lint }}
+          SKIP_TESTS: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_tests }}
+          SKIP_DOCKER: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_docker }}
         run: |
-          printed="$(docker run --rm "ratelimiter:${GITHUB_SHA}" -version)"
-          test "${printed}" = "${GITHUB_SHA}"
+          failed=0
+          check() {
+            local job="$1" result="$2" skip="$3" expected=success
+            if [ "${skip}" = true ]; then expected=skipped; fi
+            printf '| %s | %s | %s |\n' "${job}" "${result}" "${expected}" >> "${GITHUB_STEP_SUMMARY}"
+            if [ "${result}" != "${expected}" ]; then
+              echo "::error::${job}: expected ${expected}, got ${result}"
+              failed=1
+            fi
+          }
+          {
+            echo '## CI results'
+            echo '| Job | Result | Expected |'
+            echo '| --- | --- | --- |'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          check build "${BUILD_RESULT}" false
+          check lint "${LINT_RESULT}" "${SKIP_LINT}"
+          check test "${TEST_RESULT}" "${SKIP_TESTS}"
+          check docker "${DOCKER_RESULT}" "${SKIP_DOCKER}"
+          if [ "${SKIP_LINT}" = true ] || [ "${SKIP_TESTS}" = true ] || [ "${SKIP_DOCKER}" = true ]; then
+            echo 'Manual diagnostic run: some checks were deliberately skipped.' >> "${GITHUB_STEP_SUMMARY}"
+          fi
+          exit "${failed}"

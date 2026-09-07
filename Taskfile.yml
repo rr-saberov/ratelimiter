@@ -23,12 +23,23 @@ tasks:
   test:
     desc: Run all tests with the race detector
     cmds:
-      - go test -race -count=1 ./...
+      - go test -race -count=1 -timeout=5m ./...
+
+  coverage:
+    desc: Run tests with race detection and a coverage report
+    cmds:
+      - go test -race -count=1 -timeout=5m -coverprofile=coverage.out ./...
+      - go tool cover -func=coverage.out
 
   lint:
     desc: Run golangci-lint
     cmds:
       - golangci-lint run
+
+  lint:workflows:
+    desc: Validate GitHub Actions syntax and expressions
+    cmds:
+      - go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 
   run:
     desc: Build and start the server with default flags
@@ -40,6 +51,12 @@ tasks:
     desc: Build the Docker image locally (task docker VERSION=v1.2.3)
     cmds:
       - docker build --build-arg VERSION={{.VERSION}} -t {{.BINARY_NAME}}:{{.VERSION}} .
+
+  docker:smoke:
+    desc: Build and check the image's version, HTTP rate limit and shutdown
+    cmds:
+      - task: docker
+      - bash .github/scripts/smoke-docker.sh {{.BINARY_NAME}}:{{.VERSION}} {{.VERSION}}
 
   clean:
     desc: Remove build outputs
