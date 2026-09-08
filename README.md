@@ -2,94 +2,81 @@
 
 [![CI](https://github.com/rr-saberov/ratelimiter/actions/workflows/ci.yml/badge.svg)](https://github.com/rr-saberov/ratelimiter/actions/workflows/ci.yml)
 [![CD](https://github.com/rr-saberov/ratelimiter/actions/workflows/cd.yml/badge.svg)](https://github.com/rr-saberov/ratelimiter/actions/workflows/cd.yml)
-[![Go](https://img.shields.io/github/go-mod/go-version/rr-saberov/ratelimiter)](go.mod)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A small Go HTTP service that limits requests per client IP using a token bucket.
-Built to demonstrate CI/CD with GitHub Actions. No third-party runtime dependencies.
+A small Go HTTP service demonstrating CI/CD with GitHub Actions.
+It limits requests per client IP using a token bucket, with no third-party runtime dependencies.
 
-## Quick start
+Repository: [rr-saberov/ratelimiter](https://github.com/rr-saberov/ratelimiter).
 
-With Go 1.26 or newer, run from the repository root:
+## Run locally
+
+Requires Go 1.26 or newer. From the repository root:
 
 ```sh
 go run ./cmd/ratelimiter
 ```
 
-Or use Docker:
+In another terminal:
 
 ```sh
-docker run --rm -p 8080:8080 ghcr.io/rr-saberov/ratelimiter:latest
+curl -i localhost:8080/
 ```
 
-Then, in another terminal:
+`GET /` returns `200 OK` while the client has tokens, or `429 Too Many Requests`
+with a `Retry-After` header when the bucket is empty. Each client starts with five
+tokens and regains one per second, up to the capacity.
 
-```sh
-for i in 1 2 3 4 5 6; do
-  curl -s -o /dev/null -w '%{http_code}\n' localhost:8080/
-done
-```
-
-With a fresh bucket, six requests within one second return five `200` responses
-followed by `429 Too Many Requests`. Each client starts with five tokens and regains
-one per second, up to the capacity. Rejected requests include a `Retry-After` header.
-
-## Configuration
+To change the defaults:
 
 ```sh
 go run ./cmd/ratelimiter -addr :8080 -capacity 20 -refill 250ms
 ```
 
-| Flag | Default | Description |
-| --- | --- | --- |
-| `-addr` | `:8080` | Listen address |
-| `-capacity` | `5` | Maximum burst per client |
-| `-refill` | `1s` | Time to replenish one token |
-| `-version` | `false` | Print the build version and exit |
+Client buckets live in memory without eviction and are not shared between instances.
+Clients are identified by the TCP peer IP; `X-Forwarded-For` is ignored.
 
-The endpoint is `GET /`. The server shuts down gracefully on `SIGINT` or `SIGTERM`.
-
-## Development
+## Build and test
 
 ```sh
 go build ./...
 go test -race -count=1 -timeout=5m ./...
 ```
 
-[Task](https://taskfile.dev) shortcuts are defined in [Taskfile.yml](Taskfile.yml):
+Optional [Task](https://taskfile.dev) shortcuts are listed in [Taskfile.yml](Taskfile.yml).
+For local linting, run `golangci-lint run` with version v2.13.2, as used in CD.
+
+## Workflows
+
+**[CI](.github/workflows/ci.yml)** runs on every push to `main`:
+checkout → set up Go → build → test.
+
+**[CD](.github/workflows/cd.yml)** runs when a GitHub Release is published manually:
+checkout the release commit → set up Go → lint → test → build → upload the binary
+to that release. Steps run sequentially; a failed check prevents publication.
+
+To try CD, open **Releases → Draft a new release**, choose a new tag such as `v1.2.3`,
+and click **Publish release**. Once CD succeeds, download `ratelimiter_linux_amd64`
+from the release assets. On Linux amd64:
 
 ```sh
-task run             # Build and start the server
-task lint            # Requires golangci-lint v2.13.2
-task lint:workflows   # Validate GitHub Actions workflows
-task coverage        # Run tests and report coverage
-task docker:smoke    # Build and test the Docker image
-task --list          # Show all commands
+chmod +x ratelimiter_linux_amd64
+./ratelimiter_linux_amd64
 ```
 
-Code: [token bucket library](ratelimit/), [HTTP handler](internal/httpapi/),
-[server entry point](cmd/ratelimiter/).
+The workflow uses the [`release: published` event](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#release),
+so saving a draft does not trigger it. Keep immutable releases disabled because CD
+attaches the binary after publication.
 
-## CI/CD
+## Marketplace actions
 
-| Workflow | Trigger | Result |
-| --- | --- | --- |
-| [CI](.github/workflows/ci.yml) | Pushes to `main`, PRs targeting `main`, or manual runs | Build, lint, tests with race detection and coverage, Docker smoke test |
-| [CD](.github/workflows/cd.yml) | GitHub Release published | Lint and test, attach binaries and SHA-256 checksums, publish Docker image to GHCR |
+| Action | Purpose |
+| --- | --- |
+| [actions/checkout](https://github.com/marketplace/actions/checkout) | Check out the project code |
+| [actions/setup-go](https://github.com/marketplace/actions/setup-go-environment) | Install the Go version from `go.mod` |
+| [golangci/golangci-lint-action](https://github.com/marketplace/actions/run-golangci-lint) | Lint the code in CD |
+| [softprops/action-gh-release](https://github.com/marketplace/actions/gh-release) | Attach the binary to the GitHub Release |
 
-Releases include binaries for Linux and macOS (amd64/arm64), and Windows (amd64).
-Docker images support Linux amd64/arm64; `latest` tracks stable releases in publication order.
-
-To release, publish a GitHub Release with a new tag such as `v1.2.3`.
-CD then builds and uploads the artifacts. This flow requires immutable releases to be disabled.
-
-See the [CI/CD reference](docs/ci-cd.md) for release commands, manual checks,
-branch protection, action pinning, and troubleshooting.
-
-## Limitations
-
-This is a demo: client buckets stay in memory without eviction and are not shared
-between instances. Clients are identified by the TCP peer IP; `X-Forwarded-For` is ignored.
+Actions are pinned to commit SHAs, with version comments for readability.
 
 ## License
 

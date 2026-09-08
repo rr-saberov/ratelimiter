@@ -47,17 +47,6 @@ tasks:
     cmds:
       - ./{{.BINARY_NAME}}
 
-  docker:
-    desc: Build the Docker image locally (task docker VERSION=v1.2.3)
-    cmds:
-      - docker build --build-arg VERSION={{.VERSION}} -t {{.BINARY_NAME}}:{{.VERSION}} .
-
-  docker:smoke:
-    desc: Build and check the image's version, HTTP rate limit and shutdown
-    cmds:
-      - task: docker
-      - bash .github/scripts/smoke-docker.sh {{.BINARY_NAME}}:{{.VERSION}} {{.VERSION}}
-
   clean:
     desc: Remove build outputs
     cmds:

@@ -2,53 +2,20 @@ name: CD
 
 on:
   release:
-    types:
-      - published
+    types: [published]
 
 permissions:
   contents: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.release.tag_name }}
-  cancel-in-progress: false
-
-env:
-  BINARY_NAME: ratelimiter
-  MAIN_PACKAGE: ./cmd/ratelimiter
-  RELEASE_TAG: ${{ github.event.release.tag_name }}
-
 jobs:
-  validate:
-    name: Validate release tag
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      stable: ${{ steps.tag.outputs.stable }}
-    steps:
-      - name: Validate asset name and version
-        id: tag
-        env:
-          PRERELEASE: ${{ github.event.release.prerelease }}
-        shell: bash
-        run: |
-          # Keep the tag safe as a filename and as a single Go linker argument.
-          if [[ ! "${RELEASE_TAG}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._+-]{0,119}$ ]]; then
-            echo '::error::Use a release tag of 1-120 letters, digits, dots, underscores, pluses or hyphens, starting with a letter or digit.'
-            exit 1
-          fi
-          stable=false
-          if [[ "${PRERELEASE}" = false && "${RELEASE_TAG}" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            stable=true
-          fi
-          echo "stable=${stable}" >> "${GITHUB_OUTPUT}"
-
-  lint:
-    name: Lint
-    needs: validate
+  release:
+    name: Build and upload binary
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
-      - name: Checkout code
+      - name: Checkout release commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
@@ -64,191 +31,17 @@ jobs:
         with:
           version: v2.13.2
 
-  test:
-    name: Unit tests
-    needs: validate
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout release commit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: go.mod
-
-      - name: Test with race detection
+      - name: Test
         run: go test -race -count=1 -timeout=5m ./...
 
-  docker:
-    name: Publish Docker image
-    needs: [validate, build]
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Compute image tags
-        id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
-        with:
-          images: ghcr.io/${{ github.repository }}
-          flavor: latest=false
-          tags: |
-            type=ref,event=tag
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}},enable=${{ needs.validate.outputs.stable == 'true' }}
-            type=raw,value=latest,enable=${{ needs.validate.outputs.stable == 'true' }}
-
-      - name: Build and push image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: VERSION=${{ env.RELEASE_TAG }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          provenance: false
-
-      - name: Summarize
-        env:
-          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
-        run: |
-          {
-            echo "## Docker image"
-            echo
-            echo '```'
-            echo "${IMAGE_TAGS}"
-            echo '```'
-          } >> "${GITHUB_STEP_SUMMARY}"
-
-  build:
-    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
-    needs: [lint, test]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
-          - goos: darwin
-            goarch: amd64
-          - goos: darwin
-            goarch: arm64
-          - goos: windows
-            goarch: amd64
-    env:
-      GOOS: ${{ matrix.goos }}
-      GOARCH: ${{ matrix.goarch }}
-      CGO_ENABLED: "0"
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: go.mod
-
       - name: Build binary
-        id: build
-        run: |
-          output="dist/${BINARY_NAME}_${RELEASE_TAG}_${GOOS}_${GOARCH}"
-          if [ "${GOOS}" = "windows" ]; then
-            output="${output}.exe"
-          fi
-          go build -trimpath -ldflags "-s -w -X main.version=${RELEASE_TAG}" -o "${output}" "${MAIN_PACKAGE}"
-          echo "output=${output}" >> "${GITHUB_OUTPUT}"
-
-      - name: Smoke test native binary
-        if: ${{ matrix.goos == 'linux' && matrix.goarch == 'amd64' }}
         env:
-          BINARY_PATH: ${{ steps.build.outputs.output }}
-        run: test "$("${BINARY_PATH}" -version)" = "${RELEASE_TAG}"
+          CGO_ENABLED: "0"
+        run: go build -o dist/ratelimiter_linux_amd64 ./cmd/ratelimiter
 
-      - name: Upload build artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: ${{ env.BINARY_NAME }}-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: ${{ steps.build.outputs.output }}
-          if-no-files-found: error
-          retention-days: 7
-
-  publish:
-    name: Attach binaries to release
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          pattern: ${{ env.BINARY_NAME }}-*
-          path: dist
-          merge-multiple: true
-
-      - name: Generate checksums
-        working-directory: dist
-        run: |
-          for target in linux_amd64 linux_arm64 darwin_amd64 darwin_arm64 windows_amd64.exe; do
-            test -s "${BINARY_NAME}_${RELEASE_TAG}_${target}"
-          done
-          checksums="${BINARY_NAME}_${RELEASE_TAG}_checksums.txt"
-          sha256sum -- * > "${RUNNER_TEMP}/${checksums}"
-          mv "${RUNNER_TEMP}/${checksums}" .
-          sha256sum --check "${checksums}"
-          cat "${checksums}"
-
-      - name: Upload release assets
+      - name: Upload binary to release
         uses: softprops/action-gh-release@5113cdc90fd4d541c801c55356214017bf5ae34b # v3
         with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          files: dist/*
+          tag_name: ${{ github.event.release.tag_name }}
+          files: dist/ratelimiter_linux_amd64
           fail_on_unmatched_files: true
-
-      - name: Summarize
-        env:
-          RELEASE_URL: ${{ github.event.release.html_url }}
-        run: |
-          {
-            echo "## Release ${RELEASE_TAG}"
-            echo
-            echo "Assets attached to ${RELEASE_URL}:"
-            echo
-            echo '```'
-            ls -1 dist
-            echo '```'
-          } >> "${GITHUB_STEP_SUMMARY}"
