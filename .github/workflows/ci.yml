@@ -8,8 +8,8 @@ permissions:
   contents: read
 
 jobs:
-  build-and-test:
-    name: CI result
+  build:
+    name: BUILD
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -26,5 +26,40 @@ jobs:
       - name: Build
         run: go build ./...
 
+  test:
+    name: TEST
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+
       - name: Test
         run: go test -race -count=1 -timeout=5m ./...
+
+  lint:
+    name: LINTER
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@db9de0fc1a667e1a49d2291a1a042dff081d78f6 # v9
+        with:
+          version: v2.13.2

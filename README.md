@@ -43,16 +43,34 @@ go test -race -count=1 -timeout=5m ./...
 ```
 
 Optional [Task](https://taskfile.dev) shortcuts are listed in [Taskfile.yml](Taskfile.yml).
-For local linting, run `golangci-lint run` with version v2.13.2, as used in CD.
+For local linting, run `golangci-lint run` with version v2.13.2, as used in CI and CD.
 
 ## Workflows
 
-**[CI](.github/workflows/ci.yml)** runs on every push to `main`:
-checkout → set up Go → build → test.
+**[CI](.github/workflows/ci.yml)** runs on every push to `main` with three parallel jobs:
+`BUILD` compiles all packages, `TEST` runs tests with race detection, and `LINTER` runs
+golangci-lint. Each job checks out the code and sets up Go, with its own status and logs
+in the GitHub Actions UI. Steps within each job run sequentially.
 
-**[CD](.github/workflows/cd.yml)** runs when a GitHub Release is published manually:
-checkout the release commit → set up Go → lint → test → build → upload the binary
-to that release. Steps run sequentially; a failed check prevents publication.
+**[CD](.github/workflows/cd.yml)** runs when a GitHub Release is published manually.
+`BUILD`, `TEST`, and `LINTER` run in parallel against the release commit. `BUILD` produces
+one Linux amd64 binary and stores it as a workflow artifact. `PUBLISH` downloads that
+binary and attaches it to the release only after all three jobs succeed.
+
+```mermaid
+flowchart LR
+    R[Release published] --> B[BUILD]
+    R --> T[TEST]
+    R --> L[LINTER]
+    B --> P[PUBLISH]
+    T --> P
+    L --> P
+```
+
+Separate jobs make failures easier to locate and allow independent reruns; parallel
+checks can shorten feedback time. The tradeoff is repeated checkout and Go setup,
+more runner time, and artifact transfer between build and publication. A failed check
+does not stop the other independent checks, but it blocks `PUBLISH`.
 
 To try CD, open **Releases → Draft a new release**, choose a new tag such as `v1.2.3`,
 and click **Publish release**. Once CD succeeds, download `ratelimiter_linux_amd64`
@@ -73,7 +91,9 @@ attaches the binary after publication.
 | --- | --- |
 | [actions/checkout](https://github.com/marketplace/actions/checkout) | Check out the project code |
 | [actions/setup-go](https://github.com/marketplace/actions/setup-go-environment) | Install the Go version from `go.mod` |
-| [golangci/golangci-lint-action](https://github.com/marketplace/actions/run-golangci-lint) | Lint the code in CD |
+| [golangci/golangci-lint-action](https://github.com/marketplace/actions/run-golangci-lint) | Lint the code in CI and CD |
+| [actions/upload-artifact](https://github.com/marketplace/actions/upload-a-build-artifact) | Store the CD build output for publication |
+| [actions/download-artifact](https://github.com/marketplace/actions/download-a-build-artifact) | Retrieve the binary in the publication job |
 | [softprops/action-gh-release](https://github.com/marketplace/actions/gh-release) | Attach the binary to the GitHub Release |
 
 Actions are pinned to commit SHAs, with version comments for readability.
